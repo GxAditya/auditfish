@@ -4,7 +4,8 @@ import type { VerifyRequest } from "./request-schema";
 export type StreamEvent =
   | { type: "status"; message: string }
   | { type: "streaming_url"; url: string; source: string }
-  | { type: "progress"; message: string }
+  | { type: "run_started"; run_id: string; source: string }
+  | { type: "progress"; message: string; source: string }
   | { type: "source_done"; check: SourceCheck }
   | { type: "result"; result: VerificationResult }
   | { type: "error"; message: string };

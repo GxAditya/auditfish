@@ -227,6 +227,27 @@
   .af-node, .af-rail, .af-check { animation: af-fade 150ms ease both; }
 }
 
+/* Live ticker: the current agent action rises into place, the previous one leaves upward */
+@keyframes af-ticker-in { from { opacity: 0; transform: translateY(70%); } to { opacity: 1; transform: none; } }
+@keyframes af-ticker-out { from { opacity: 1; transform: none; } to { opacity: 0; transform: translateY(-70%); } }
+.af-ticker-in { animation: af-ticker-in 220ms var(--ease-out) both; }
+.af-ticker-out { animation: af-ticker-out 200ms var(--ease-out) both; }
+/* In-progress step: a quiet ring pulse instead of a loader */
+@keyframes af-pulse-ring {
+  0%, 100% { box-shadow: 0 0 0 0 color-mix(in oklab, var(--color-primary) 35%, transparent); }
+  50% { box-shadow: 0 0 0 4px color-mix(in oklab, var(--color-primary) 0%, transparent); }
+}
+.af-pulse-ring { animation: af-pulse-ring 1.6s ease-in-out infinite; }
+@media (prefers-reduced-motion: reduce) {
+  .af-ticker-in { animation: af-fade 120ms ease both; }
+  .af-ticker-out { animation: none; opacity: 0; }
+  .af-pulse-ring { animation: none; }
+}
+
+/* Agent browser in full screen: drop the 16:10 box and fill the screen under the header row */
+.af-frame-wrap:fullscreen { display: flex; flex-direction: column; border-radius: 0; }
+.af-frame-wrap:fullscreen .af-frame { aspect-ratio: auto; max-height: none; flex: 1; }
+
 /* Active tab pill: a clipped copy of the label row wipes from one tab to the next */
 .af-tab-clip {
   transition: clip-path 240ms var(--ease-in-out);

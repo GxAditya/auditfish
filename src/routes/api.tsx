@@ -3,9 +3,9 @@ import { createFileRoute } from "@tanstack/react-router";
 export const Route = createFileRoute("/api")({
   head: () => ({
     meta: [
-      { title: "API & schema — AuditFish" },
+      { title: "API & schema | AuditFish" },
       { name: "description", content: "Call AuditFish from your own tools and get a structured auditfish.v1 verification record." },
-      { property: "og:title", content: "API & schema — AuditFish" },
+      { property: "og:title", content: "API & schema | AuditFish" },
       { property: "og:description", content: "JSON endpoint and output schema for official licence and registry checks." },
       { property: "og:type", content: "website" },
       { name: "twitter:card", content: "summary_large_image" },
@@ -49,7 +49,7 @@ const SCHEMA = `{
   }],
   "candidates": [{                         // only when outcome = multiple_matches
     "holder_name", "number", "location", "status_raw", "status", "detail_url"
-  }],                                      // also used for near-name matches (e.g. Sharan/Saran) — never auto-picked
+  }],                                      // also used for near-name matches (e.g. Sharan/Saran), never auto-picked
   "sources_checked": [{ "registry_name", "url", "result", "message", "searches", "checked_at" }]
 }`;
 
@@ -74,7 +74,7 @@ function ApiPage() {
         <ul className="mt-2 list-disc space-y-1 pl-5">
           <li>Only government and statutory regulator websites are used as sources.</li>
           <li>If a licence number is given it must match exactly; otherwise all name parts must match.</li>
-          <li>When more than one entry matches, the result is <code className="font-mono">multiple_matches</code> — never an automatic pick.</li>
+          <li>When more than one entry matches, the result is <code className="font-mono">multiple_matches</code>, never an automatic pick.</li>
           <li>Fields not shown on the registry are <code className="font-mono">null</code>, never filled in.</li>
         </ul>
       </section>

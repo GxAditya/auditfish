@@ -1,13 +1,40 @@
 // Shared, browser-safe types and pure logic for AuditFish verification results.
 
 export const RECORD_TYPES = [
-  { value: "medical", label: "Medical licence (doctor)" },
-  { value: "nurse", label: "Nursing licence" },
-  { value: "contractor", label: "Contractor licence" },
-  { value: "lawyer", label: "Lawyer / bar licence" },
-  { value: "company", label: "Company registration" },
-  { value: "other", label: "Other (describe)" },
+  { value: "medical", label: "Medical licence (doctor)", profession: "Medical Doctor / Physician (MD or DO)" },
+  { value: "nurse", label: "Nursing licence", profession: "Nurse (RN, LPN, APRN)" },
+  { value: "contractor", label: "Contractor licence", profession: "Contractor" },
+  { value: "lawyer", label: "Lawyer / bar licence", profession: "Attorney / Lawyer" },
+  { value: "company", label: "Company registration", profession: null },
+  { value: "other", label: "Other (describe)", profession: null },
 ] as const;
+
+// Licence-type wording that fits each record type. Registers such as Florida's list every
+// health profession together, so a "Danielle Lee" search mixes doctors, nurses and EMTs.
+const PROFESSION_FIT: Partial<Record<string, { fits: RegExp; excludes?: RegExp }>> = {
+  medical: { fits: /medical doctor|physician|osteopath|surgeon|medicine|medical practitioner|resident|intern\b|\bm\.?d\b|\bd\.?o\b/i, excludes: /assis|\bpa\b|nurs|techn/i }, // registers truncate labels ("Physician Assis")
+  nurse: { fits: /nurs|\brn\b|\blpn\b|\baprn\b|\bnp\b|midwi/i, excludes: /assis|\bcna\b|aide/i },
+  lawyer: { fits: /attorney|lawyer|solicitor|barrister|advocate|bar\b|law/i },
+};
+
+// Values agents put in licence_type when the register has no profession column
+// (NMC India: "Bihar Medical Council", "MBBS", a year or serial number). They say nothing about profession.
+const NOT_A_LICENCE_TYPE = /council|board|commission|authority|college|ministry|department|registry|register\b|^[\W\d_]*$/i;
+const ANY_PROFESSION = /doctor|physician|surgeon|osteopath|medic(al|ine)|nurs|\brn\b|\blpn\b|aprn|midwi|assis|\bpa\b|techn|therap|pharm|dent|diet|nutri|optom|chiro|podiat|psycholog|paramedic|\bemt\b|aide|\bcna\b|attorney|lawyer|solicitor|barrister|advocate|contractor|resident|intern\b/i;
+
+/** False only when the row states a licence type that clearly isn't the one asked for; unknown types are kept. */
+export function fitsRecordType(licenceType: string | null | undefined, recordType: string): boolean {
+  const rule = PROFESSION_FIT[recordType];
+  if (!rule || !licenceType?.trim() || NOT_A_LICENCE_TYPE.test(licenceType) || !ANY_PROFESSION.test(licenceType)) return true;
+  return rule.fits.test(licenceType) && !(rule.excludes?.test(licenceType) ?? false);
+}
+
+/** Agents sometimes paste a whole result row ("ME163720 | LEE, DANIELLE | Medical Doctor | …") as the name. */
+export function cleanHolderName(raw: string, queryName: string): string {
+  const parts = raw.split("|").map((p) => p.trim()).filter(Boolean);
+  if (parts.length < 2) return raw.trim();
+  return parts.reduce((best, p) => (nameScore(queryName, p) > nameScore(queryName, best) ? p : best), parts[0]!);
+}
 
 export type RecordTypeValue = (typeof RECORD_TYPES)[number]["value"];
 
@@ -47,6 +74,8 @@ export interface VerifiedRecord {
 export interface Candidate {
   holder_name: string;
   number: string | null;
+  /** Profession / licence type exactly as the register shows it, e.g. "Medical Doctor". */
+  licence_type?: string | null | undefined;
   location: string | null;
   status_raw: string | null;
   status: NormalizedStatus;
@@ -93,8 +122,6 @@ export interface VerificationResult {
   checked_at: string;
 }
 
-// ---------- status normalization ----------
-
 export function normalizeStatus(raw: string | null | undefined): NormalizedStatus {
   if (!raw) return "unknown";
   const s = raw.toLowerCase();
@@ -105,8 +132,6 @@ export function normalizeStatus(raw: string | null | undefined): NormalizedStatu
   if (/\bactive\b|current|in good standing|good standing|registered|licensed|valid|clear|live|full registration|practising/.test(s)) return "active";
   return "unknown";
 }
-
-// ---------- name matching ----------
 
 const STOP = new Set([
   "dr", "mr", "mrs", "ms", "md", "do", "the", "inc", "llc", "ltd", "limited", "plc", "co",
@@ -160,6 +185,15 @@ export function partialNameMatch(query: string, candidate: string): boolean {
   return q.slice(0, -1).every((t) => tokenMatches(t, c));
 }
 
+const sameName = (a: string, b: string) => nameTokens(a).sort().join(" ") === nameTokens(b).sort().join(" ");
+const TRAINING_LICENCE = /resident|intern\b|training|provisional|temporary|student/i;
+
+/** When one person holds a full licence and a training one (e.g. Medical Doctor + Resident), keep the full licence. */
+export function preferFullLicences(candidates: Candidate[]): Candidate[] {
+  const isTraining = (c: Candidate) => TRAINING_LICENCE.test(c.licence_type ?? "");
+  return candidates.filter((c) => !isTraining(c) || !candidates.some((f) => !isTraining(f) && sameName(f.holder_name, c.holder_name)));
+}
+
 export interface MatchDecision {
   outcome: "match" | "multiple_matches" | "no_match";
   /** "exact" = every name token (or the licence number) matched; "partial" = only a variant/initial match, so a person must confirm. */
@@ -171,7 +205,7 @@ export interface MatchDecision {
  * Decide strictly: a licence number, when given, must match exactly.
  * Otherwise every name token must be present. Spelling-variant or initial
  * matches, and anything with more than one survivor, are returned as
- * multiple_matches for a person to confirm — never auto-picked.
+ * multiple_matches for a person to confirm. Never auto-picked.
  */
 export function decideMatch(query: { name: string; number: string | null }, candidates: Candidate[]): MatchDecision {
   const wantNum = normalizeNumber(query.number);
@@ -198,8 +232,6 @@ export function decideMatch(query: { name: string; number: string | null }, cand
   if (matched.length === 1 && confidence === "exact") return { outcome: "match", confidence, matched };
   return { outcome: "multiple_matches", confidence, matched };
 }
-
-// ---------- official source checks ----------
 
 const OFFICIAL_SUFFIXES = [
   ".gov", ".mil", ".gov.uk", ".gov.in", ".nic.in", ".gov.au", ".govt.nz", ".gc.ca", ".gov.sg",
@@ -242,6 +274,27 @@ export function isOfficialDomain(url: string): boolean {
   return OFFICIAL_REGULATOR_DOMAINS.some((d) => !d.endsWith("-excluded") && (host === d || host.endsWith("." + d)));
 }
 
+const DOCUMENT_URL = /\.(pdf|docx?|pptx?|xlsx?|csv|rtf|odt|ods|odp|zip)$|\/wp-content\/uploads\//i;
+const REGISTER_HINT = /search|\bregist(er|ry)s?\b|verif|look-?up|\bfind\b|directory|\bcheck\b|enquir/i;
+const NOT_A_REGISTER = /manual|powerpoint|presentation|notification|notice|circular|\bnews\b|press release|gazette|tender|recruit|career|sign-?up|log-?in|\bapply\b|application form|renewal|fee structure|download|annual report|\bfaq\b/i;
+const SINGLE_RECORD_PATH = /detail|profile\/|\/view\//i;
+
+/**
+ * How likely a search hit is the official register's search page: higher is better,
+ * null = not usable (documents, manuals, notices, sign-up pages, one person's detail page).
+ */
+export function sourceScore(url: string, title: string | null | undefined): number | null {
+  let path = "";
+  try {
+    path = decodeURIComponent(new URL(url).pathname);
+  } catch {
+    return null;
+  }
+  const t = title ?? "";
+  if (DOCUMENT_URL.test(path) || NOT_A_REGISTER.test(path) || NOT_A_REGISTER.test(t) || SINGLE_RECORD_PATH.test(path)) return null;
+  return (REGISTER_HINT.test(path) ? 2 : 0) + (REGISTER_HINT.test(t) ? 1 : 0);
+}
+
 /** Human-readable list of the compliance-relevant fields that differ between two checks of the same record. */
 export function diffRecords(before: VerifiedRecord, after: VerifiedRecord): string[] {
   const changes: string[] = [];
@@ -264,7 +317,7 @@ export function overallMessage(result: Pick<VerificationResult, "outcome" | "rec
     case "match":
       return `One matching record found in ${result.records[0]?.registry_name ?? src}.`;
     case "multiple_matches":
-      return `${result.candidates.length} possible matches in ${src}. Pick the right one — AuditFish will not guess.`;
+      return `${result.candidates.length} possible matches in ${src}. Pick the right one; AuditFish will not guess.`;
     case "no_match":
       return `No matching record found in ${src}.`;
     default:

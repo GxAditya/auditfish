@@ -29,6 +29,7 @@ export const Route = createFileRoute("/api/public/verify")({
             sources,
             target: (d.target as any) ?? null,
             maxSources: d.target ? 1 : 2,
+            signal: request.signal,
           });
           return Response.json(result, { headers: CORS });
         } catch (e) {

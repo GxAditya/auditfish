@@ -3,6 +3,7 @@ import { z } from "zod";
 const candidate = z.object({
   holder_name: z.string().max(300),
   number: z.string().max(100).nullable(),
+  licence_type: z.string().max(200).nullable().optional(),
   location: z.string().max(500).nullable(),
   status_raw: z.string().max(300).nullable(),
   status: z.string().max(20),

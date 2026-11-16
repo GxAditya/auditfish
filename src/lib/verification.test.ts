@@ -1,5 +1,21 @@
 import { describe, expect, it } from "vitest";
-import { decideMatch, diffRecords, isOfficialDomain, normalizeStatus, phoneticKey, type Candidate, type VerifiedRecord } from "./verification";
+import { cleanHolderName, decideMatch, diffRecords, fitsRecordType, isOfficialDomain, normalizeStatus, phoneticKey, preferFullLicences, sourceScore, type Candidate, type VerifiedRecord } from "./verification";
+
+describe("discovered source ranking", () => {
+  it("rejects documents, manuals and single-record pages (Bihar search results)", () => {
+    expect(sourceScore("https://bcmr.net.in/wp-content/uploads/2025/07/User-manual-BMC-for-Applicant_New.pdf", "PowerPoint Presentation")).toBeNull();
+    expect(sourceScore("https://example.gov.in/files/register.PPTX", "Register")).toBeNull();
+    expect(sourceScore("https://doctor.ndhm.gov.in/en/home/dr-detail-page/MTM2MDcy", null)).toBeNull();
+    expect(sourceScore("https://bcmr.net.in/fee-structure/", "Fee Structure")).toBeNull();
+  });
+
+  it("ranks register search pages above generic official pages", () => {
+    const search = sourceScore("https://ayushedu.bisag-n.gov.in/BERISM/Search_Practitioner", "BERISM")!;
+    const home = sourceScore("https://bcmr.net.in/", "Bihar Council of Medical Registration – Bihar Medical Council")!;
+    expect(search).toBeGreaterThan(home);
+    expect(home).toBe(0);
+  });
+});
 
 const c = (holder_name: string, number: string | null = null): Candidate => ({ holder_name, number, location: null, status_raw: null, status: "unknown", detail_url: null });
 
@@ -40,6 +56,49 @@ describe("matching never guesses", () => {
   });
   it("number given but the list shows none: same-name rows need confirmation", () => {
     expect(decideMatch({ name: "Jane Smith", number: "A1" }, [c("Jane Smith")]).outcome).toBe("multiple_matches");
+  });
+});
+
+describe("same name, different professions (Florida DOH 'Danielle Lee' search)", () => {
+  // Real rows returned by the Florida Department of Health register.
+  const row = (number: string, name: string, type: string): Candidate => ({ ...c(name, number), licence_type: type });
+  const rows = [
+    row("PA9117381", "Lee, Danielle", "Physician Assis"),
+    row("RN9485744", "Lee, Danielle", "Registered Nurs"),
+    row("EMT558540", "Lee, Danielle Ann", "EMT"),
+    row("ND9857", "Lee, Danielle Y", "Dietitia"),
+    row("ME163720", "LEE, DANIELLE NICOLE RENEE", "Medical Doctor"),
+    row("TRN24949", "LEE, DANIELLE NICOLE RENEE", "Resident"),
+    row("RPT17349", "LEE, DANIELLE NICOLE RENEE", "Reg Pharm Tech"),
+  ];
+  it("keeps only doctors, and the full licence over the same person's residency", () => {
+    const pool = preferFullLicences(rows.filter((r) => fitsRecordType(r.licence_type, "medical")));
+    const d = decideMatch({ name: "Danielle Lee", number: null }, pool);
+    expect(d.outcome).toBe("match");
+    expect(d.matched[0]?.number).toBe("ME163720");
+  });
+  it("two different doctors with the same name still need a person to choose", () => {
+    const pool = [...rows, row("ME999999", "Lee, Danielle K", "Medical Doctor")].filter((r) => fitsRecordType(r.licence_type, "medical"));
+    expect(decideMatch({ name: "Danielle Lee", number: null }, preferFullLicences(pool)).outcome).toBe("multiple_matches");
+  });
+  it("rows without a licence type are kept rather than dropped", () => {
+    expect(fitsRecordType(null, "medical")).toBe(true);
+    expect(fitsRecordType("Physician and Surgeon", "medical")).toBe(true);
+    expect(fitsRecordType("Registered Nurse", "nurse")).toBe(true);
+    expect(fitsRecordType("Certified Nursing Assistant", "nurse")).toBe(false);
+  });
+  it("does not treat a council, degree, serial number or father's name as another profession (NMC India)", () => {
+    for (const v of ["Bihar Medical Council", "MBBS", "12", "RAM SHARAN"]) expect(fitsRecordType(v, "medical")).toBe(true);
+  });
+  it("matches a surname-first listing (NMC 'SHARAN ASHUTOSH')", () => {
+    const rows = [{ ...c("SHARAN ASHUTOSH", "41234"), licence_type: "Bihar Medical Council" }, c("SHARAN KUMAR", "40001"), c("ASHUTOSH KUMAR", "40002")];
+    const d = decideMatch({ name: "Ashutosh Sharan", number: null }, rows.filter((r) => fitsRecordType(r.licence_type, "medical")));
+    expect(d.outcome).toBe("match");
+    expect(d.matched[0]?.number).toBe("41234");
+  });
+  it("pulls the name out of a pasted result row", () => {
+    expect(cleanHolderName("ME163720 | LEE, DANIELLE NICOLE RENEE | Medical Doctor | WINTER GARDEN | Clear/Active", "Danielle Lee")).toBe("LEE, DANIELLE NICOLE RENEE");
+    expect(cleanHolderName("Jane Smith", "Jane Smith")).toBe("Jane Smith");
   });
 });
 

@@ -1,12 +1,16 @@
 // Server-only TinyFish client + verification pipeline.
 import { knownSourcesFor } from "./registries";
 import {
+  cleanHolderName,
   decideMatch,
+  fitsRecordType,
   hostOf,
+  preferFullLicences,
   isOfficialDomain,
   normalizeStatus,
   overallMessage,
   RECORD_TYPES,
+  sourceScore,
   type Candidate,
   type SourceCheck,
   type SourceInfo,
@@ -44,8 +48,6 @@ async function tf(apiKey: string, url: string, init: RequestInit = {}) {
   return body;
 }
 
-// ---------------- sources ----------------
-
 export function recordTypeLabel(v: string, other?: string | null) {
   if (v === "other") return other || "licence or registration";
   return RECORD_TYPES.find((r) => r.value === v)?.label ?? v;
@@ -63,15 +65,19 @@ export async function discoverSources(apiKey: string, q: { country: string; regi
       queries.map((query) => tf(apiKey, `${SEARCH}?${new URLSearchParams({ query, language: "en" })}`, { method: "GET" }).catch(() => null)),
     );
     const results: any[] = bodies.flatMap((b) => b?.results ?? []);
-    const seenHosts = new Set(known.map((k) => k.domain));
-    for (const r of results) {
-      if (!r?.url || !isOfficialDomain(r.url)) continue;
+    const knownHosts = new Set(known.map((k) => k.domain));
+    // Best-scoring page per official host; ties keep search-engine order.
+    const best = new Map<string, { score: number; order: number; source: SourceInfo }>();
+    results.forEach((r, order) => {
+      if (!r?.url || !isOfficialDomain(r.url)) return;
       const host = hostOf(r.url);
-      if (seenHosts.has(host)) continue;
-      seenHosts.add(host);
-      discovered.push({ id: `disc-${host}`, name: String(r.title ?? host).slice(0, 120), url: r.url, domain: host, kind: "discovered" });
-      if (discovered.length >= 4) break;
-    }
+      const score = sourceScore(r.url, r.title);
+      if (knownHosts.has(host) || score === null) return;
+      const prev = best.get(host);
+      if (prev && prev.score >= score) return;
+      best.set(host, { score, order, source: { id: `disc-${host}`, name: String(r.title ?? host).slice(0, 120), url: r.url, domain: host, kind: "discovered" } });
+    });
+    discovered = [...best.values()].sort((a, b) => b.score - a.score || a.order - b.order).slice(0, 4).map((b) => b.source);
   } catch (e) {
     // Search is optional: built-in registries still work if it fails.
     console.error("[tinyfish] source search failed", e instanceof Error ? e.message : e);
@@ -80,12 +86,11 @@ export async function discoverSources(apiKey: string, q: { country: string; regi
   return [...known, ...discovered];
 }
 
-// ---------------- agent ----------------
-
 export type PipelineEvent =
   | { type: "status"; message: string }
   | { type: "streaming_url"; url: string; source: string }
-  | { type: "progress"; message: string }
+  | { type: "run_started"; run_id: string; source: string }
+  | { type: "progress"; message: string; source: string }
   | { type: "source_done"; check: SourceCheck };
 
 const nullableStr = { type: "string", nullable: true };
@@ -104,6 +109,7 @@ const LOOKUP_SCHEMA = {
         properties: {
           holder_name: { type: "string" },
           number: nullableStr,
+          licence_type: nullableStr,
           location: nullableStr,
           status_raw: nullableStr,
           detail_url: nullableStr,
@@ -140,19 +146,22 @@ const LOOKUP_SCHEMA = {
 
 export function lookupGoal(q: VerifyQuery, label: string, target?: Candidate) {
   const place = q.region ? `${q.region}, ${q.country}` : q.country;
+  const profession = target?.licence_type ?? RECORD_TYPES.find((r) => r.value === q.record_type)?.profession ?? (q.record_type === "company" ? null : label);
   const who = target
     ? `the entry for "${target.holder_name}"${target.number ? ` with number ${target.number}` : ""}${target.location ? ` (${target.location})` : ""}`
     : `"${q.name}"${q.number ? ` (licence/registration number ${q.number})` : ""}`;
   const fallbacks = target
     ? `If that returns no rows, search by the name instead.`
-    : `If a search returns no rows, retry in this order and stop at the first that returns rows: (a) surname/last word only, (b) the name in reverse order, (c) the first name only. Keep the state/council filter on for every retry. Never run more than 4 searches in total.`;
+    : `If a search returns no rows, retry in this order and stop at the first that returns rows: (a) the name in reverse order (many registers, e.g. in India, list the surname first), (b) surname/last word only, (c) the first name only. Keep the state/council filter on for every retry. Never run more than 4 searches in total.`;
+  const nameOrder = `Registers often show names in a different order or form: "${q.name}" may appear as "${q.name.trim().split(/\s+/).reverse().join(" ")}", "${q.name.trim().split(/\s+/).reverse().join(", ")}", in capitals, with a title (Dr.) or with initials. All of these are the same name.`;
   return [
     `You are checking a ${label} on this official register for ${place}. Stay on this website.`,
-    `1. Find the public search form. It may be on this page or one click away (a link like "Search the register", "Verify a licence", "Find a doctor/company"). Close cookie or notice banners.${q.region ? ` If the form has a state, province, council or jurisdiction filter, choose the option for ${q.region}.` : ""}`,
-    `2. Look up ${who}. If a number is given, search by number first; otherwise search by full name. ${fallbacks} Put the exact terms of each search you ran into "searches_tried", e.g. "name=Sharan; council=Bihar Medical Council".`,
-    `3. Put every result row (up to 25) into "candidates" exactly as shown: name, licence/registration/company number, location or council, status text, and the link to that row's own detail page if it has one. Do not filter, merge or guess.`,
-    `4. If exactly one row is clearly ${target ? "the target entry" : `"${q.name}"`}, open its details. That can be a separate page, a popup or modal (a "View" or "Details" button), or an expanding row. Fill "record" verbatim from it: name, number, status text, licence/record kind, issue/registration date, expiry/renewal date, address, and every disciplinary action, public order, sanction, condition or enforcement action (date, action, summary, link). Set record.detail_url only if the details opened as their own page with their own address; otherwise null. If several rows could be the person or business, leave "record" null.`,
-    `5. If every search returned nothing, set page_state "no_results". If a captcha you cannot pass, a login wall, an error page or a block stops you, set page_state "blocked_or_error" and explain in blocked_reason.`,
+    `1. Find the public search form. It may be on this page or one click away (a link like "Search the register", "Verify a licence", "Find a doctor/company"). Close cookie or notice banners.${q.region ? ` If the form has a state, province, council or jurisdiction filter, choose the option for ${q.region}.` : ""}${profession ? ` If the form has a profession, licence type, board or category filter, choose the option closest to "${profession}" (leave it on "all" only if nothing fits).` : ""}`,
+    `2. Look up ${who}. If a number is given, search by number first; otherwise search by name.${q.record_type === "company" ? "" : " For a person, use the person-name fields: if there are separate last-name and first-name fields, put the surname in the last-name field and the given name in the first-name field. Never type a person's name into a business or organisation name field."} ${fallbacks} Put the exact terms of each search you ran into "searches_tried", e.g. "last=Lee; first=Danielle; profession=Medical Doctor".`,
+    `3. Put every result row (up to 25) into "candidates" exactly as shown, one field per column: holder_name is only the person's or business's name (never the whole row), number is the licence/registration/company number, licence_type is the profession or licence type column (e.g. "Medical Doctor", "Registered Nurse"), plus location or council, status text, and the link to that row's own detail page if it has one. Leave licence_type null if the register has no profession column (a council, degree or year is not a licence type). Do not filter, merge or guess. ${target ? "" : `${nameOrder} If there are more than 25 rows or several pages, look through all of them (use next page if needed) and list first every row whose name contains all parts of "${q.name}" in any order, then rows containing some parts. Never leave out a row because its name order differs.`}`,
+    `4. If exactly one row is clearly ${target ? "the target entry" : `"${q.name}" (in any name order)`}${profession && !target ? ` with a licence type that fits "${profession}" (or no licence type shown)` : ""}, open its details. That can be a separate page, a popup or modal (a "View" or "Details" button), or an expanding row. Fill "record" verbatim from it: name, number, status text, licence/record kind, issue/registration date, expiry/renewal date, address, and every disciplinary action, public order, sanction, condition or enforcement action (date, action, summary, link). Set record.detail_url only if the details opened as their own page with their own address; otherwise null. If several rows could be the person or business, leave "record" null.`,
+    `5. Set page_state "no_results" only if every search showed zero rows. If rows were shown, set "results_found" and list them in "candidates" even if none looks like the person. If a captcha you cannot pass, a login wall, an error page or a block stops you, set page_state "blocked_or_error" and explain in blocked_reason.`,
+    `If something on the form does not work, do not keep retrying it: never repeat the same action more than twice. If a dropdown or filter will not open or shows no options, skip that filter and search without it. If the search itself cannot be run, or the site is under maintenance, stop at once with page_state "blocked_or_error" and say what was broken.`,
     `Rules: copy values verbatim; use null for anything not shown; never invent names, numbers, dates or statuses. Do not log in, create accounts, pay, or submit any form other than the register search.`,
   ].join("\n");
 }
@@ -165,11 +174,65 @@ async function startAgent(apiKey: string, body: Record<string, unknown>) {
   });
 }
 
-async function runAgentSSE(apiKey: string, url: string, goal: string, onEvent: (e: PipelineEvent) => void, sourceName: string): Promise<any> {
+// Guard rails for one registry. A broken form (e.g. a dropdown that never opens) makes the
+// agent retry the same action; we stop it, cancel the TinyFish run and try the next source.
+// Cancelling a run throws its result away, so the time budget is enforced by TinyFish itself
+// (agent_config.max_duration_seconds): when it runs out the agent writes up what it found and the
+// run ends COMPLETED. Our own timer and step cap are only backstops, well past that budget.
+export const AGENT_DURATION_S = 180;
+const SOURCE_TIME_LIMIT_MS = (AGENT_DURATION_S + 120) * 1000;
+const SOURCE_STEP_LIMIT = 90;
+// Up to 4 name searches are allowed, so pressing "Search" 4 times is normal; 5 repeats is a loop.
+const LOOP_WINDOW = 12;
+const LOOP_REPEATS = 5;
+
+/** Collapses near-identical agent actions ("Click the Profession dropdown (attempt 3)") to one key. */
+const FILLER = new Set(["again", "retry", "once", "more", "another", "attempt", "try", "to", "the", "a", "an", "on", "in", "for", "of", "and", "now", "still", "see", "if"]);
+export function actionKey(purpose: string): string {
+  return purpose
+    .toLowerCase()
+    .replace(/\(.*?\)|[\d"'“”‘’.,:;!?]/g, " ")
+    .split(/\s+/)
+    .filter((w) => w && !FILLER.has(w))
+    .map((w) => (w.length > 4 ? w.replace(/(ing|ed|es|s)$/, "") : w))
+    .join(" ");
+}
+
+// Paging through a long result list legitimately repeats these; the step limit still applies.
+const PROGRESS_ACTIONS = /\b(scroll|wait|load|read|review|extract|next page|paginat)/;
+
+/** Share of words two actions have in common (0..1). */
+function overlap(a: string, b: string): number {
+  const x = new Set(a.split(" "));
+  const y = new Set(b.split(" "));
+  const shared = [...x].filter((w) => y.has(w)).length;
+  return shared / Math.max(1, Math.min(x.size, y.size));
+}
+
+/** The repeated action if the last few steps are going in circles, otherwise null. */
+export function detectLoop(purposes: string[]): string | null {
+  const recent = purposes.slice(-LOOP_WINDOW).filter((p) => {
+    const k = actionKey(p);
+    return k && !PROGRESS_ACTIONS.test(k);
+  });
+  for (let i = recent.length - 1; i >= 0; i--) {
+    const k = actionKey(recent[i]!);
+    if (recent.filter((p) => overlap(k, actionKey(p)) >= 0.75).length >= LOOP_REPEATS) return recent[i]!;
+  }
+  return null;
+}
+
+export function cancelRun(apiKey: string, runId: string) {
+  return fetch(`${AGENT}/v1/runs/${encodeURIComponent(runId)}/cancel`, { method: "POST", headers: { "X-API-Key": apiKey.trim() } }).catch(() => null);
+}
+
+async function runAgentSSE(apiKey: string, url: string, goal: string, onEvent: (e: PipelineEvent) => void, sourceName: string, signal?: AbortSignal): Promise<any> {
   const base = { url, goal, output_schema: LOOKUP_SCHEMA };
   // Try the most capable config first, then fall back to plainer requests if the account/plan rejects options.
   const attempts: Record<string, unknown>[] = [
-    { ...base, browser_profile: "stealth", agent_config: { max_steps: 40, max_duration_seconds: 300 } },
+    // Custom max_steps is a beta-gated option (403 otherwise), so it is not requested.
+    { ...base, browser_profile: "stealth", agent_config: { max_duration_seconds: AGENT_DURATION_S } },
+    { ...base, browser_profile: "stealth" },
     { ...base },
     { url, goal: goal + "\nReturn the result as JSON with keys page_state, blocked_reason, searches_tried, candidates, record." },
   ];
@@ -192,32 +255,65 @@ async function runAgentSSE(apiKey: string, url: string, goal: string, onEvent: (
   const dec = new TextDecoder();
   let buf = "";
   let final: any = null;
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buf += dec.decode(value, { stream: true });
-    let idx;
-    while ((idx = buf.indexOf("\n\n")) >= 0) {
-      const chunk = buf.slice(0, idx);
-      buf = buf.slice(idx + 2);
-      const data = chunk
-        .split("\n")
-        .filter((l) => l.startsWith("data:"))
-        .map((l) => l.slice(5).trim())
-        .join("");
-      if (!data) continue;
-      let ev: any;
-      try {
-        ev = JSON.parse(data);
-      } catch {
-        continue;
+  let runId: string | null = null;
+  let stopReason: string | null = null;
+  const purposes: string[] = [];
+  const stop = (reason: string) => {
+    if (stopReason) return;
+    stopReason = reason;
+    if (runId) void cancelRun(apiKey, runId);
+    void reader.cancel().catch(() => {});
+  };
+  const timer = setTimeout(() => stop(`Stopped after ${Math.round(SOURCE_TIME_LIMIT_MS / 1000)}s without a result. The register may be slow or its search form broken.`), SOURCE_TIME_LIMIT_MS);
+  const onAbort = () => stop("Cancelled because the check was closed.");
+  signal?.addEventListener("abort", onAbort);
+  if (signal?.aborted) onAbort();
+  try {
+    while (!stopReason) {
+      const { done, value } = await reader.read().catch(() => ({ done: true, value: undefined }));
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+      let idx;
+      while ((idx = buf.indexOf("\n\n")) >= 0) {
+        const chunk = buf.slice(0, idx);
+        buf = buf.slice(idx + 2);
+        const data = chunk
+          .split("\n")
+          .filter((l) => l.startsWith("data:"))
+          .map((l) => l.slice(5).trim())
+          .join("");
+        if (!data) continue;
+        let ev: any;
+        try {
+          ev = JSON.parse(data);
+        } catch {
+          continue;
+        }
+        if (ev.run_id && !runId) {
+          runId = String(ev.run_id);
+          onEvent({ type: "run_started", run_id: runId, source: sourceName });
+        }
+        if (ev.type === "STREAMING_URL" && ev.streaming_url) onEvent({ type: "streaming_url", url: ev.streaming_url, source: sourceName });
+        else if (ev.type === "PROGRESS") {
+          const purpose = String(ev.purpose ?? ev.action ?? ev.message ?? "Working…");
+          purposes.push(purpose);
+          onEvent({ type: "progress", message: purpose, source: sourceName });
+          const loop = detectLoop(purposes);
+          if (loop) stop(`Stopped: the agent kept repeating “${loop.slice(0, 120)}”. Part of this register's search form appears broken.`);
+          else if (purposes.length >= SOURCE_STEP_LIMIT) stop(`Stopped after ${SOURCE_STEP_LIMIT} steps without a result.`);
+        } else if (ev.type === "COMPLETE") final = ev;
       }
-      if (ev.type === "STREAMING_URL" && ev.streaming_url) onEvent({ type: "streaming_url", url: ev.streaming_url, source: sourceName });
-      else if (ev.type === "PROGRESS") onEvent({ type: "progress", message: String(ev.purpose ?? ev.action ?? ev.message ?? "Working…") });
-      else if (ev.type === "COMPLETE") final = ev;
     }
+  } finally {
+    clearTimeout(timer);
+    signal?.removeEventListener("abort", onAbort);
+  }
+  if (stopReason) {
+    onEvent({ type: "progress", message: stopReason, source: sourceName });
+    throw new TinyFishError(stopReason, 504);
   }
   if (!final) throw new TinyFishError("The agent stream ended without a result.", 502);
+  if (final.status === "CANCELLED") throw new TinyFishError("Skipped: this registry's run was cancelled.", 499);
   if (final.status && final.status !== "COMPLETED") {
     const err = typeof final.error === "string" ? final.error : final.error?.message;
     throw new TinyFishError(err ?? final.help_message ?? `Agent run ${String(final.status).toLowerCase()}`, 502);
@@ -245,12 +341,19 @@ function absolutize(u: string | null | undefined, base: string): string | null {
   }
 }
 
+/** For rows pasted whole ("ME163720 | LEE, DANIELLE | Medical Doctor | …"), the cell that isn't the name, number, place or status. */
+function rowLicenceType(row: string, queryName: string, known: (string | null | undefined)[]): string | null {
+  const parts = row.split("|").map((p) => p.trim()).filter(Boolean);
+  if (parts.length < 3) return null;
+  const name = cleanHolderName(row, queryName);
+  const skip = new Set([name, ...known].filter(Boolean).map((s) => String(s).toLowerCase()));
+  return parts.find((p) => !skip.has(p.toLowerCase())) ?? null;
+}
+
 function sameUrl(a: string, b: string) {
   const norm = (u: string) => u.replace(/^https?:\/\/(www\.)?/i, "").replace(/[/#?]+$/, "").toLowerCase();
   return norm(a) === norm(b);
 }
-
-// ---------------- pipeline ----------------
 
 export interface PipelineInput {
   query: VerifyQuery;
@@ -258,6 +361,8 @@ export interface PipelineInput {
   sources: SourceInfo[]; // in order of preference
   target?: Candidate | null; // set when user picked one of multiple matches
   maxSources?: number;
+  /** Aborts the check (client went away); the running TinyFish run is cancelled too. */
+  signal?: AbortSignal | undefined;
 }
 
 export async function runVerification(apiKey: string, input: PipelineInput, onEvent: (e: PipelineEvent) => void = () => {}): Promise<VerificationResult> {
@@ -270,7 +375,7 @@ export async function runVerification(apiKey: string, input: PipelineInput, onEv
   let lastOutcome: VerificationResult["outcome"] = "source_error";
 
   for (const src of input.sources) {
-    if (tried >= maxSources) break;
+    if (tried >= maxSources || input.signal?.aborted) break;
     tried++;
     const now = () => new Date().toISOString();
     let searches: string[] = [];
@@ -282,7 +387,7 @@ export async function runVerification(apiKey: string, input: PipelineInput, onEv
     onEvent({ type: "status", message: `Searching ${src.name}…` });
     try {
       const startUrl = input.target?.detail_url && hostOf(input.target.detail_url) === src.domain ? input.target.detail_url : src.url;
-      const raw = await runAgentSSE(apiKey, startUrl, lookupGoal(query, label, input.target ?? undefined), onEvent, src.name);
+      const raw = await runAgentSSE(apiKey, startUrl, lookupGoal(query, label, input.target ?? undefined), onEvent, src.name, input.signal);
 
       searches = Array.isArray(raw.searches_tried) ? raw.searches_tried.filter((s: unknown) => typeof s === "string").slice(0, 6) : [];
       if (raw.page_state === "blocked_or_error") {
@@ -291,8 +396,9 @@ export async function runVerification(apiKey: string, input: PipelineInput, onEv
       }
 
       const candidates: Candidate[] = (raw.candidates ?? []).filter((c: any) => c?.holder_name).map((c: any) => ({
-        holder_name: String(c.holder_name).trim(),
+        holder_name: cleanHolderName(String(c.holder_name), query.name),
         number: c.number ?? null,
+        licence_type: c.licence_type ?? rowLicenceType(String(c.holder_name), query.name, [c.number, c.location, c.status_raw]),
         location: c.location ?? null,
         status_raw: c.status_raw ?? null,
         status: normalizeStatus(c.status_raw),
@@ -301,11 +407,15 @@ export async function runVerification(apiKey: string, input: PipelineInput, onEv
 
       const rec = raw.record;
       const recCandidate: Candidate | null = rec?.holder_name
-        ? { holder_name: rec.holder_name, number: rec.number ?? null, location: rec.address ?? null, status_raw: rec.status_raw ?? null, status: normalizeStatus(rec.status_raw), detail_url: absolutize(rec.detail_url, startUrl) }
+        ? { holder_name: cleanHolderName(String(rec.holder_name), query.name), number: rec.number ?? null, licence_type: rec.record_kind ?? null, location: rec.address ?? null, status_raw: rec.status_raw ?? null, status: normalizeStatus(rec.status_raw), detail_url: absolutize(rec.detail_url, startUrl) }
         : null;
 
-      const pool = candidates.length ? candidates : recCandidate ? [recCandidate] : [];
       const target = input.target;
+      const listed = candidates.length ? candidates : recCandidate ? [recCandidate] : [];
+      // A picked entry is already the right profession; otherwise set aside rows whose
+      // licence type is clearly another profession (nurses, EMTs… on a doctor search).
+      const pool = target ? listed : preferFullLicences(listed.filter((c) => fitsRecordType(c.licence_type, query.record_type)));
+      const otherProfessions = listed.length - (target ? listed.length : listed.filter((c) => fitsRecordType(c.licence_type, query.record_type)).length);
       const decision = decideMatch(
         target ? { name: target.holder_name, number: target.number ?? query.number } : { name: query.name, number: query.number },
         pool,
@@ -339,15 +449,16 @@ export async function runVerification(apiKey: string, input: PipelineInput, onEv
 
       if (decision.outcome === "match" || decision.outcome === "multiple_matches") {
         // A single list match without a confirmed detail page is still shown as a choice,
-        // so the user confirms it and AuditFish opens the detail page — never guessed.
+        // so the user confirms it and AuditFish opens the detail page. It is never guessed.
         const n = decision.matched.length;
-        done("multiple_matches", decision.confidence === "partial" ? `${n} entr${n === 1 ? "y" : "ies"} with a similar but not identical name — confirm the right one` : `${n} candidate(s) need confirmation`);
+        done("multiple_matches", decision.confidence === "partial" ? `${n} entr${n === 1 ? "y" : "ies"} with a similar but not identical name; confirm the right one` : `${n} candidate(s) need confirmation`);
         lastCandidates = decision.matched.map((c) => ({ ...c, detail_url: c.detail_url ?? null }));
         lastOutcome = "multiple_matches";
         break;
       }
 
-      done("no_match", pool.length ? `${pool.length} result(s) on the page, none matched the query` : "The registry returned no results");
+      const setAside = otherProfessions ? ` (${otherProfessions} with a different licence type, such as ${[...new Set(listed.filter((c) => !fitsRecordType(c.licence_type, query.record_type)).map((c) => c.licence_type))].slice(0, 3).join(", ")})` : "";
+      done("no_match", listed.length ? `${listed.length} result(s) on the page${setAside}; none matched the query` : "The registry returned no results");
       lastOutcome = "no_match";
       // keep checking the next official source for a no-match
     } catch (e) {
@@ -370,8 +481,6 @@ export async function runVerification(apiKey: string, input: PipelineInput, onEv
   result.message = checks.length === 0 ? "No official source was found for this place and record type." : overallMessage(result);
   return result;
 }
-
-// ---------------- monitors ----------------
 
 export async function createMonitor(apiKey: string, m: { name: string; url: string; purpose: string }) {
   return tf(apiKey, `${AGENT}/v1/monitors`, {

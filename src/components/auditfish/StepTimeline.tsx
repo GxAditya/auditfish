@@ -1,10 +1,9 @@
 import { useEffect, useRef } from "react";
 import { Check } from "lucide-react";
-import { DotLoader } from "@/components/auditfish/DotLoader";
 import { cn } from "@/lib/utils";
 
 /** Vertical checkpoint tree: each streamed action becomes a node; the newest one is "in progress" while running. */
-export function StepTimeline({ steps, running }: { steps: string[]; running: boolean }) {
+export function StepTimeline({ steps, running, className }: { steps: string[]; running: boolean; className?: string }) {
   const ref = useRef<HTMLDivElement>(null);
   useEffect(() => {
     const el = ref.current;
@@ -12,11 +11,11 @@ export function StepTimeline({ steps, running }: { steps: string[]; running: boo
   }, [steps.length]);
 
   if (steps.length === 0) {
-    return <p className="mt-4 text-xs text-muted-foreground">{running ? "Starting the agent…" : "No actions recorded."}</p>;
+    return <p className="text-xs text-muted-foreground">{running ? "Starting the agent…" : "No actions recorded."}</p>;
   }
 
   return (
-    <div ref={ref} className="mt-4 max-h-72 overflow-auto pr-1">
+    <div ref={ref} className={cn("overflow-auto pr-1", className)}>
       <ol className="relative">
         {steps.map((s, i) => {
           const last = i === steps.length - 1;
@@ -27,10 +26,10 @@ export function StepTimeline({ steps, running }: { steps: string[]; running: boo
               <span
                 className={cn(
                   "relative z-10 mt-0.5 flex h-[19px] w-[19px] shrink-0 items-center justify-center rounded-full border transition-colors duration-200",
-                  active ? "border-primary/40 bg-card text-primary" : "border-primary bg-primary text-primary-foreground",
+                  active ? "af-pulse-ring border-primary bg-card" : "border-primary bg-primary text-primary-foreground",
                 )}
               >
-                {active ? <DotLoader size={11} /> : <Check className="af-check h-3 w-3" strokeWidth={3} />}
+                {!active && <Check className="af-check h-3 w-3" strokeWidth={3} />}
               </span>
               <div className="min-w-0 flex-1">
                 <p className={cn("text-xs leading-5", active ? "af-glow-text font-medium" : "text-foreground")}>{s}</p>

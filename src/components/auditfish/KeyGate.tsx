@@ -18,7 +18,7 @@ export function KeyDialog({ open, onOpenChange }: { open: boolean; onOpenChange:
             <a className="underline" href="https://agent.tinyfish.ai/api-keys" target="_blank" rel="noreferrer">agent.tinyfish.ai</a>.
           </DialogDescription>
         </DialogHeader>
-        <Input type="password" placeholder={apiKey ? "•••••••• (saved) — paste to replace" : "sk-tinyfish-…"} value={value} onChange={(e) => setValue(e.target.value)} />
+        <Input type="password" placeholder={apiKey ? "•••••••• (saved), paste to replace" : "sk-tinyfish-…"} value={value} onChange={(e) => setValue(e.target.value)} />
         <DialogFooter className="gap-2">
           {apiKey && (
             <Button variant="outline" onClick={() => { save(null); onOpenChange(false); }}>Remove key</Button>

@@ -14,9 +14,22 @@ export const Route = createFileRoute("/api/public/verify-stream")({
         const { discoverSources, runVerification, TinyFishError } = await import("@/lib/tinyfish.server");
         const d = parsed.data;
         const enc = new TextEncoder();
+        // Closing the tab cancels the stream; that must also cancel the paid TinyFish run.
+        const abort = new AbortController();
+        request.signal?.addEventListener("abort", () => abort.abort());
         const stream = new ReadableStream({
+          cancel() {
+            abort.abort();
+          },
           async start(controller) {
-            const send = (o: unknown) => controller.enqueue(enc.encode(JSON.stringify(o) + "\n"));
+            const send = (o: unknown) => {
+              if (abort.signal.aborted) return;
+              try {
+                controller.enqueue(enc.encode(JSON.stringify(o) + "\n"));
+              } catch {
+                abort.abort();
+              }
+            };
             try {
               const sources = d.sources?.length
                 ? d.sources
@@ -29,6 +42,7 @@ export const Route = createFileRoute("/api/public/verify-stream")({
                   sources,
                   target: (d.target as any) ?? null,
                   maxSources: d.target ? 1 : 2,
+                  signal: abort.signal,
                 },
                 send,
               );
@@ -36,7 +50,11 @@ export const Route = createFileRoute("/api/public/verify-stream")({
             } catch (e) {
               send({ type: "error", message: e instanceof TinyFishError ? e.message : "Verification failed unexpectedly." });
             } finally {
-              controller.close();
+              try {
+                controller.close();
+              } catch {
+                /* already cancelled by the client */
+              }
             }
           },
         });

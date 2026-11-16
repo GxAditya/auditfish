@@ -1,6 +1,7 @@
 import { createServerFn } from "@tanstack/react-start";
 import { z } from "zod";
 import {
+  cancelRun,
   createMonitor,
   deleteMonitor,
   discoverSources,
@@ -27,6 +28,16 @@ export const findSources = createServerFn({ method: "POST" })
     } catch (e) {
       fail(e);
     }
+  });
+
+// "Skip this registry": cancelling the TinyFish run ends that source's stream, and the
+// verification pipeline moves on to the next official source.
+export const skipAgentRun = createServerFn({ method: "POST" })
+  .inputValidator((d) => z.object({ apiKey: key, runId: z.string().min(1).max(100) }).parse(d))
+  .handler(async ({ data }) => {
+    const res = await cancelRun(data.apiKey, data.runId);
+    if (!res || !res.ok) throw new Error("Could not skip this registry. Please try again.");
+    return { ok: true };
   });
 
 export const watchRecord = createServerFn({ method: "POST" })

@@ -1,10 +1,10 @@
-import { StepTimeline } from "@/components/auditfish/StepTimeline";
+import { LiveTicker, type LiveStep } from "@/components/auditfish/LiveTicker";
 import { DotLoader } from "@/components/auditfish/DotLoader";
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { useEffect, useRef, useState } from "react";
 import { useServerFn } from "@tanstack/react-start";
 import { toast } from "sonner";
-import { AlertTriangle, CheckCircle2, ChevronRight, ExternalLink, History, SearchX, ShieldCheck, Users } from "lucide-react";
+import { AlertTriangle, CheckCircle2, ChevronRight, ExternalLink, History, Maximize2, Pencil, SearchX, ShieldCheck, SkipForward, Users } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -12,7 +12,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Sheet, SheetContent, SheetDescription, SheetTitle } from "@/components/ui/sheet";
 import { KeyRequired } from "@/components/auditfish/KeyGate";
 import { RecordCard, StatusPill } from "@/components/auditfish/RecordCard";
-import { findSources, watchRecord } from "@/lib/auditfish.functions";
+import { findSources, skipAgentRun, watchRecord } from "@/lib/auditfish.functions";
 import { addHistory, clearHistory, loadHistory, saveSnapshot, useApiKey, type HistoryItem } from "@/lib/local-store";
 import { COUNTRIES } from "@/lib/registries";
 import { streamVerify, type StreamEvent } from "@/lib/stream-client";
@@ -21,9 +21,9 @@ import { RECORD_TYPES, type Candidate, type SourceCheck, type SourceInfo, type V
 export const Route = createFileRoute("/")({
   head: () => ({
     meta: [
-      { title: "AuditFish — Verify a licence or company registration" },
-      { name: "description", content: "Check if a doctor, contractor, lawyer or company is licensed and in good standing — live from the official registry, with proof." },
-      { property: "og:title", content: "AuditFish — Verify a licence or company registration" },
+      { title: "AuditFish | Verify a licence or company registration" },
+      { name: "description", content: "Check if a doctor, contractor, lawyer or company is licensed and in good standing, live from the official registry, with proof." },
+      { property: "og:title", content: "AuditFish | Verify a licence or company registration" },
       { property: "og:description", content: "Live checks against official licensing boards and company registries, with a source link and change monitoring." },
       { property: "og:type", content: "website" },
       { name: "twitter:card", content: "summary_large_image" },
@@ -51,9 +51,18 @@ function VerifyPage() {
   const [finding, setFinding] = useState(false);
   const [running, setRunning] = useState(false);
   const [statusLine, setStatusLine] = useState("");
-  const [steps, setSteps] = useState<string[]>([]);
+  const [steps, setSteps] = useState<LiveStep[]>([]);
+  const [startedAt, setStartedAt] = useState<number | null>(null);
+  const [finishedAt, setFinishedAt] = useState<number | null>(null);
+  // After "Verify now" the form and source list fold into a one-line summary.
+  const [collapsed, setCollapsed] = useState(false);
+  const sourcesRef = useRef<HTMLElement | null>(null);
+  const stageRef = useRef<HTMLDivElement | null>(null);
   const [checks, setChecks] = useState<SourceCheck[]>([]);
   const [liveUrl, setLiveUrl] = useState<{ url: string; source: string } | null>(null);
+  const [activeRun, setActiveRun] = useState<{ run_id: string; source: string } | null>(null);
+  const [skipping, setSkipping] = useState(false);
+  const skipFn = useServerFn(skipAgentRun);
   const [result, setResult] = useState<VerificationResult | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [watched, setWatched] = useState<string | null>(null);
@@ -62,6 +71,13 @@ function VerifyPage() {
   const abortRef = useRef<AbortController | null>(null);
 
   useEffect(() => setHistory(loadHistory()), []);
+  // One scroll per stage, and only when the new stage isn't already comfortably in view.
+  useEffect(() => {
+    if (sources?.length && !collapsed) revealStage(sourcesRef.current);
+  }, [sources]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    if (running || result) revealStage(stageRef.current);
+  }, [running, result]);
   const openKey = () => window.dispatchEvent(new Event("auditfish:open-key"));
   const set = (k: keyof FormState) => (v: string) => {
     setForm((f) => ({ ...f, [k]: v }));
@@ -93,12 +109,15 @@ function VerifyPage() {
     const ac = new AbortController();
     abortRef.current = ac;
     setRunning(true);
+    setCollapsed(true);
     setResult(null);
     setError(null);
     setWatched(null);
     setSteps([]);
     setChecks([]);
     setLiveUrl(null);
+    setStartedAt(Date.now());
+    setFinishedAt(null);
     setStatusLine("Starting…");
     try {
       await streamVerify(
@@ -115,9 +134,14 @@ function VerifyPage() {
         },
         (ev: StreamEvent) => {
           if (ev.type === "status") setStatusLine(ev.message);
-          else if (ev.type === "progress") setSteps((s) => [...s.slice(-30), ev.message]);
+          else if (ev.type === "progress") setSteps((s) => [...s, { source: ev.source, message: ev.message }].slice(-300));
           else if (ev.type === "streaming_url") setLiveUrl({ url: ev.url, source: ev.source });
-          else if (ev.type === "source_done") setChecks((c) => [...c, ev.check]);
+          else if (ev.type === "run_started") setActiveRun({ run_id: ev.run_id, source: ev.source });
+          else if (ev.type === "source_done") {
+            setChecks((c) => [...c, ev.check]);
+            setActiveRun(null);
+            setSkipping(false);
+          }
           else if (ev.type === "result") {
             setResult(ev.result);
             addHistory(ev.result);
@@ -130,7 +154,32 @@ function VerifyPage() {
       if (!ac.signal.aborted) setError(err instanceof Error ? err.message : "Verification failed");
     } finally {
       setRunning(false);
+      setActiveRun(null);
+      setSkipping(false);
+      setFinishedAt(Date.now());
     }
+  }
+
+  async function skipRegistry() {
+    if (!apiKey || !activeRun) return;
+    setSkipping(true);
+    try {
+      await skipFn({ data: { apiKey, runId: activeRun.run_id } });
+    } catch (err) {
+      setSkipping(false);
+      toast.error(err instanceof Error ? err.message : "Could not skip this registry");
+    }
+  }
+
+  function openPast(h: HistoryItem) {
+    abortRef.current?.abort();
+    setSteps([]);
+    setChecks([]);
+    setLiveUrl(null);
+    setError(null);
+    setWatched(null);
+    setResult(h.result);
+    setHistoryOpen(false);
   }
 
   async function watch() {
@@ -157,7 +206,7 @@ function VerifyPage() {
     const rec = result?.records[0];
     if (!rec || !sources) return;
     const src = sources.find((s) => s.name === rec.registry_name);
-    run({ holder_name: rec.holder_name, number: rec.number, location: rec.address, status_raw: rec.status_raw, status: rec.status, detail_url: rec.source_url }, src ? [src] : undefined);
+    run({ holder_name: rec.holder_name, number: rec.number, licence_type: rec.record_type, location: rec.address, status_raw: rec.status_raw, status: rec.status, detail_url: rec.source_url_type === "record_page" ? rec.source_url : null }, src ? [src] : undefined);
   };
 
   return (
@@ -176,7 +225,10 @@ function VerifyPage() {
 
       {ready && !apiKey ? (
         <KeyRequired onOpen={openKey} />
+      ) : collapsed ? (
+        <QuerySummary form={form} sources={sources?.filter((s) => selected.includes(s.id)) ?? []} disabled={running} onEdit={() => setCollapsed(false)} />
       ) : (
+        <>
         <form onSubmit={locateSources} className="grid gap-4 rounded-lg border border-border bg-card p-5 shadow-sm md:grid-cols-6">
           <StepHeader n={1} title="Who are you checking?" className="md:col-span-6" />
           <div className="md:col-span-3">
@@ -217,10 +269,9 @@ function VerifyPage() {
             </Button>
           </div>
         </form>
-      )}
 
       {sources && sources.length > 0 && (
-        <section className="af-enter rounded-lg border border-border bg-card p-5 shadow-sm">
+        <section ref={sourcesRef} className="af-enter scroll-mt-28 rounded-lg border border-border bg-card p-5 shadow-sm">
           <StepHeader n={2} title="Official sources to check" />
           <p className="mt-1 text-sm text-muted-foreground">Up to two are searched in order. Only government and statutory regulator sites are used.</p>
           <ul className="mt-4 space-y-2">
@@ -250,49 +301,53 @@ function VerifyPage() {
           </Button>
         </section>
       )}
-
-      {(running || liveUrl || checks.length > 0) && (
-        <section className="af-enter grid gap-4 md:grid-cols-5">
-          <div className="rounded-md border border-border bg-card p-4 md:col-span-2">
-            <h3 className="text-lg">Live check</h3>
-            <div className="mt-1 flex items-center gap-2 text-sm">{running && <DotLoader size={20} className="text-primary" />}{running ? <span className="af-glow-text font-medium">{statusLine}</span> : "Finished"}</div>
-            {checks.length > 0 && (
-              <ul className="mt-3 space-y-1.5">
-                {checks.map((c, i) => (
-                  <li key={i} className="af-enter rounded-md bg-muted/50 px-3 py-2">
-                    <div className="flex items-center justify-between gap-2">
-                      <p className="truncate text-xs font-semibold">{c.registry_name}</p>
-                      <span className="shrink-0 rounded bg-background px-1.5 py-0.5 font-mono text-[10px] uppercase tracking-wider text-muted-foreground">{c.result.replace("_", " ")}</span>
-                    </div>
-                    {c.message && <p className="mt-1 text-[11px] leading-relaxed text-muted-foreground">{c.message}</p>}
-                    {c.searches?.length > 0 && <p className="mt-1 font-mono text-[10px] leading-relaxed text-muted-foreground/80">Searched: {c.searches.join(" → ")}</p>}
-                  </li>
-                ))}
-              </ul>
-            )}
-            <StepTimeline steps={steps} running={running} />
-          </div>
-          <div className="overflow-hidden rounded-md border border-border bg-muted md:col-span-3">
-            {liveUrl ? (
-              <>
-                <p className="bg-card px-3 py-1.5 text-xs text-muted-foreground">Agent browser on {liveUrl.source}</p>
-                <iframe title="Live agent browser" src={liveUrl.url} className="h-80 w-full" />
-              </>
-            ) : (
-              <div className="flex h-80 items-center justify-center text-sm text-muted-foreground">Waiting for the browser to open…</div>
-            )}
-          </div>
-        </section>
+        </>
       )}
 
-      {error && (
-        <div className="af-enter flex gap-3 rounded-md border border-danger/30 bg-danger-soft p-4 text-sm">
-          <AlertTriangle className="h-5 w-5 shrink-0 text-danger" />
-          <p>{error}</p>
-        </div>
-      )}
+      {/* One stage area: the live run and its result take turns in the same place. */}
+      <div ref={stageRef} className="scroll-mt-28 space-y-4">
+        {(running || (!result && steps.length + checks.length > 0)) && (
+          <section className="af-enter space-y-3" aria-label="Live check">
+            <LiveTicker steps={steps} running={running} status={statusLine} startedAt={startedAt} finishedAt={finishedAt} registries={checks.length} />
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <SourceChips checks={checks} />
+              {running && activeRun && (
+                <Button size="sm" variant="outline" className="ml-auto" disabled={skipping} onClick={skipRegistry} title="Use this if the registry's site looks broken or stuck">
+                  <SkipForward className="mr-1.5 h-3.5 w-3.5" />
+                  {skipping ? "Skipping…" : "Skip this registry"}
+                </Button>
+              )}
+            </div>
+            <BrowserFrame live={liveUrl} />
+          </section>
+        )}
 
-      {result && <ResultView result={result} onPick={(c) => run(c)} onWatch={watch} onRecheck={recheck} watched={!!watched} running={running} />}
+        {error && (
+          <div className="af-enter flex gap-3 rounded-md border border-danger/30 bg-danger-soft p-4 text-sm">
+            <AlertTriangle className="h-5 w-5 shrink-0 text-danger" />
+            <p>{error}</p>
+          </div>
+        )}
+
+        {result && !running && (
+          <>
+            <ResultView result={result} onPick={(c) => run(c)} onWatch={watch} onRecheck={recheck} watched={!!watched} running={running} />
+            {steps.length > 0 && (
+              <details className="af-enter group rounded-md border border-border bg-card">
+                <summary className="flex cursor-pointer list-none items-center [&::-webkit-details-marker]:hidden justify-between gap-2 px-4 py-3 text-sm font-medium">
+                  How this was verified
+                  <ChevronRight className="h-4 w-4 text-muted-foreground transition-transform duration-200 group-open:rotate-90" />
+                </summary>
+                <div className="space-y-3 px-4 pb-4">
+                  <LiveTicker steps={steps} running={false} status="" startedAt={startedAt} finishedAt={finishedAt} registries={checks.length} />
+                  {result.outcome !== "no_match" && result.outcome !== "source_error" && <SourceChips checks={checks} detailed />}
+                  <BrowserFrame live={liveUrl} ended />
+                </div>
+              </details>
+            )}
+          </>
+        )}
+      </div>
 
       </div>
       <Sheet open={historyOpen} onOpenChange={setHistoryOpen}>
@@ -316,7 +371,7 @@ function VerifyPage() {
               <ul className="space-y-0.5">
                 {history.map((h) => (
                   <li key={h.id}>
-                    <button className="group flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left transition-colors hover:bg-muted" onClick={() => { setResult(h.result); setHistoryOpen(false); }}>
+                    <button className="group flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left transition-colors hover:bg-muted" onClick={() => openPast(h)}>
                       <span className={`h-2 w-2 shrink-0 rounded-full ${historyDot(h)}`} />
                       <span className="min-w-0 flex-1">
                         <span className="block truncate text-sm font-medium">{h.result.query.name}</span>
@@ -367,6 +422,124 @@ function StepHeader({ n, title, className }: { n: number; title: string; classNa
   );
 }
 
+/** Scrolls a newly shown stage into view once, unless it's already sitting in the upper half of the screen. */
+function revealStage(el: HTMLElement | null) {
+  if (!el) return;
+  requestAnimationFrame(() => {
+    const top = el.getBoundingClientRect().top;
+    if (top > 80 && top < window.innerHeight * 0.5) return;
+    const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    el.scrollIntoView({ behavior: reduce ? "auto" : "smooth", block: "start" });
+  });
+}
+
+function QuerySummary({ form, sources, disabled, onEdit }: { form: FormState; sources: SourceInfo[]; disabled: boolean; onEdit: () => void }) {
+  const type = form.record_type === "other" ? form.record_type_other || "Other" : RECORD_TYPES.find((r) => r.value === form.record_type)?.label;
+  return (
+    <div className="af-enter flex flex-wrap items-center justify-between gap-3 rounded-lg border border-border bg-card px-4 py-3 shadow-sm">
+      <div className="min-w-0 flex-1">
+        <p className="truncate text-sm font-semibold">
+          {form.name}
+          {form.number && <span className="ml-2 font-mono text-xs font-normal text-muted-foreground">#{form.number}</span>}
+        </p>
+        <p className="truncate text-xs text-muted-foreground">
+          {[type, [form.region, form.country].filter(Boolean).join(", "), `${sources.length} source${sources.length === 1 ? "" : "s"}: ${sources.map((s) => s.name.split(/\s[–-]\s/)[0]).join(", ")}`].join(" · ")}
+        </p>
+      </div>
+      <Button size="sm" variant="outline" disabled={disabled} onClick={onEdit}>
+        <Pencil className="mr-1.5 h-3.5 w-3.5" />Edit
+      </Button>
+    </div>
+  );
+}
+
+const CHECK_TONE: Record<SourceCheck["result"], string> = {
+  match: "bg-success-soft text-success",
+  multiple_matches: "bg-warning-soft text-warning",
+  no_match: "bg-muted text-muted-foreground",
+  error: "bg-danger-soft text-danger",
+};
+
+/** Per-registry outcome: compact chips during a run, full rows (message + searches typed) in the audit trail. */
+function SourceChips({ checks, detailed }: { checks: SourceCheck[]; detailed?: boolean }) {
+  if (checks.length === 0) return null;
+  if (!detailed) {
+    return (
+      <ul className="flex flex-wrap gap-2">
+        {checks.map((c, i) => (
+          <li key={i} title={c.message ?? undefined} className="af-enter flex max-w-full items-center gap-2 rounded-full border border-border bg-card py-1 pl-3 pr-1 text-xs">
+            <span className="truncate font-medium">{c.registry_name.split(/\s[–-]\s/)[0]}</span>
+            <span className={`shrink-0 rounded-full px-2 py-0.5 font-mono text-[10px] uppercase tracking-wider ${CHECK_TONE[c.result]}`}>{c.result.replace("_", " ")}</span>
+          </li>
+        ))}
+      </ul>
+    );
+  }
+  return (
+    <ul className="space-y-2">
+      {checks.map((c, i) => (
+        <li key={i} className="rounded-md bg-muted/50 px-3.5 py-2.5">
+          <div className="flex items-center justify-between gap-2">
+            <a href={c.url} target="_blank" rel="noreferrer" className="inline-flex min-w-0 items-center gap-1 truncate text-xs font-semibold text-primary hover:underline">
+              {c.registry_name}
+              <ExternalLink className="h-3 w-3 shrink-0" />
+            </a>
+            <span className={`shrink-0 rounded-full px-2 py-0.5 font-mono text-[10px] uppercase tracking-wider ${CHECK_TONE[c.result]}`}>{c.result.replace("_", " ")}</span>
+          </div>
+          {c.message && <p className="mt-1 text-[11px] leading-relaxed text-muted-foreground">{c.message}</p>}
+          {c.searches?.length > 0 && <p className="mt-1 font-mono text-[10px] leading-relaxed text-muted-foreground/80">Searched: {c.searches.join(" → ")}</p>}
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+/** The agent's browser at a readable size; full-screen on demand, collapsed once the run has ended. */
+function BrowserFrame({ live, ended }: { live: { url: string; source: string } | null; ended?: boolean }) {
+  const ref = useRef<HTMLDivElement>(null);
+  const [show, setShow] = useState(!ended);
+  if (ended && !live) return null;
+  const fullscreen = () => {
+    if (!live) return;
+    const el = ref.current;
+    if (el?.requestFullscreen) el.requestFullscreen().catch(() => window.open(live.url, "_blank", "noopener"));
+    else window.open(live.url, "_blank", "noopener");
+  };
+  if (!show) {
+    return (
+      <button type="button" onClick={() => setShow(true)} className="af-press text-xs font-medium text-primary hover:underline">
+        Show the agent's browser session
+      </button>
+    );
+  }
+  return (
+    <div ref={ref} className="af-frame-wrap overflow-hidden rounded-md border border-border bg-muted">
+      <div className="flex items-center justify-between gap-2 bg-card px-3 py-1.5">
+        <p className="truncate text-xs text-muted-foreground">{live ? `Agent browser on ${live.source}` : "Waiting for the browser to open…"}</p>
+        {live && (
+          <div className="flex shrink-0 items-center gap-1">
+            <button type="button" onClick={fullscreen} aria-label="Full screen" className="af-press rounded p-1 text-muted-foreground hover:bg-muted hover:text-foreground">
+              <Maximize2 className="h-3.5 w-3.5" />
+            </button>
+            <a href={live.url} target="_blank" rel="noreferrer" aria-label="Open in a new tab" className="rounded p-1 text-muted-foreground hover:bg-muted hover:text-foreground">
+              <ExternalLink className="h-3.5 w-3.5" />
+            </a>
+          </div>
+        )}
+      </div>
+      <div className="af-frame aspect-[16/10] max-h-[75vh] w-full">
+        {live ? (
+          <iframe title="Agent browser" src={live.url} className="h-full w-full" allow="fullscreen" />
+        ) : (
+          <div className="flex h-full items-center justify-center">
+            <span className="af-glow-text text-sm font-medium">Opening a browser on the official register…</span>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function ResultView({ result, onPick, onWatch, onRecheck, watched, running }: { result: VerificationResult; onPick: (c: Candidate) => void; onWatch: () => void; onRecheck: () => void; watched: boolean; running: boolean }) {
   const icon = { match: CheckCircle2, multiple_matches: Users, no_match: SearchX, source_error: AlertTriangle }[result.outcome];
   const Icon = icon;
@@ -393,7 +566,7 @@ function ResultView({ result, onPick, onWatch, onRecheck, watched, running }: { 
               <li key={i} className="af-enter flex flex-wrap items-center justify-between gap-3 rounded-md bg-muted/50 px-3.5 py-3" style={{ ["--i" as string]: i }}>
                 <div>
                   <p className="text-sm font-semibold">{c.holder_name}</p>
-                  <p className="mt-0.5 text-xs text-muted-foreground"><span className="font-mono">{c.number ?? "no number shown"}</span>{c.location && ` · ${c.location}`}</p>
+                  <p className="mt-0.5 text-xs text-muted-foreground"><span className="font-mono">{c.number ?? "no number shown"}</span>{c.licence_type && ` · ${c.licence_type}`}{c.location && ` · ${c.location}`}</p>
                 </div>
                 <div className="flex items-center gap-2">
                   <StatusPill status={c.status} />
@@ -421,7 +594,7 @@ function ResultView({ result, onPick, onWatch, onRecheck, watched, running }: { 
       )}
 
       <details className="rounded-md border border-border bg-card">
-        <summary className="cursor-pointer px-4 py-2 text-sm"><ShieldCheck className="mr-1 inline h-4 w-4" />Structured JSON (auditfish.v1) — <Link to="/api" className="underline">schema</Link></summary>
+        <summary className="cursor-pointer px-4 py-2 text-sm"><ShieldCheck className="mr-1 inline h-4 w-4" />Structured JSON (auditfish.v1): <Link to="/api" className="underline">schema</Link></summary>
         <pre className="mx-3 mb-3 max-h-96 overflow-auto rounded-md bg-muted/50 p-4 font-mono text-xs">{JSON.stringify(result, null, 2)}</pre>
       </details>
     </section>

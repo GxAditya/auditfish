@@ -15,9 +15,9 @@ import { diffRecords, type VerificationResult } from "@/lib/verification";
 export const Route = createFileRoute("/watchlist")({
   head: () => ({
     meta: [
-      { title: "Watchlist — AuditFish" },
+      { title: "Watchlist | AuditFish" },
       { name: "description", content: "Licences and registrations AuditFish is monitoring for status, expiry and disciplinary changes." },
-      { property: "og:title", content: "Watchlist — AuditFish" },
+      { property: "og:title", content: "Watchlist | AuditFish" },
       { property: "og:description", content: "Monitored official records with change flags." },
       { property: "og:type", content: "website" },
       { name: "twitter:card", content: "summary_large_image" },
@@ -84,7 +84,7 @@ function WatchlistPage() {
         {
           ...s.query,
           sources: [s.source],
-          target: { holder_name: r.holder_name, number: r.number, location: r.address, status_raw: r.status_raw, status: r.status, detail_url: r.source_url_type === "record_page" ? r.source_url : null },
+          target: { holder_name: r.holder_name, number: r.number, licence_type: r.record_type, location: r.address, status_raw: r.status_raw, status: r.status, detail_url: r.source_url_type === "record_page" ? r.source_url : null },
         },
         (ev) => {
           if (ev.type === "result") outcome = ev.result;
@@ -142,7 +142,7 @@ function WatchlistPage() {
                     {s?.last_run && !changed && <span className="inline-flex items-center gap-1 text-xs text-success"><CheckCircle2 className="h-3 w-3" />No relevant change</span>}
                   </div>
                   <p className="text-sm text-muted-foreground">
-                    {s ? <>{s.record.registry_name} · <span className="font-mono">{s.record.number ?? "—"}</span> · expires <span className="font-mono">{s.record.expiry_date ?? "n/a"}</span></> : m.url}
+                    {s ? <>{s.record.registry_name} · <span className="font-mono">{s.record.number ?? "n/a"}</span> · expires <span className="font-mono">{s.record.expiry_date ?? "n/a"}</span></> : m.url}
                   </p>
                   <p className="mt-1 font-mono text-xs text-muted-foreground">
                     Monitor {m.status}{s?.last_run ? ` · last checked ${new Date(s.last_run.ran_at).toLocaleString()}` : m.updated_at ? ` · updated ${m.updated_at}` : ""}

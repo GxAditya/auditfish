@@ -1,0 +1,12 @@
+// Cloudflare Workers config (free plan compatible). `npm run deploy` builds with
+// Nitro's cloudflare-module preset, which merges this file into
+// .output/server/wrangler.json; `wrangler deploy` then picks that up.
+// Cloudflare Workers Builds (GitHub connect): build `npm run build`, deploy `npx wrangler deploy`.
+// "name" must match the Worker name in the Cloudflare dashboard.
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "auditfish",
+  "compatibility_date": "2026-10-15",
+  "compatibility_flags": ["nodejs_compat"],
+  "observability": { "enabled": true }
+}
