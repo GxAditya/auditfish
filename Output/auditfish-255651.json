@@ -1,0 +1,44 @@
+{
+  "schema_version": "auditfish.v1",
+  "query": {
+    "name": "KINKHABWALA MONA PARIKH",
+    "record_type": "medical",
+    "country": "United States",
+    "region": "New York",
+    "number": null
+  },
+  "outcome": "match",
+  "records": [
+    {
+      "holder_name": "KINKHABWALA MONA PARIKH",
+      "record_type": "Medical Doctor / Physician (MD or DO)",
+      "status": "active",
+      "status_raw": "Registered",
+      "number": "255651",
+      "issued_date": "December 17, 2009",
+      "expiry_date": "November 30, 2028",
+      "disciplinary_actions": [],
+      "jurisdiction": "New York, United States",
+      "address": "SUFFERN NY",
+      "registry_name": "New York State Education Dept. – Verify a Licence",
+      "source_url": "https://eservices.nysed.gov/professions/verification-search?licenseNumber=255651&professionCode=060",
+      "source_url_type": "record_page",
+      "checked_at": "2026-11-16T20:55:18.464Z"
+    }
+  ],
+  "candidates": [],
+  "sources_checked": [
+    {
+      "registry_name": "New York State Education Dept. – Verify a Licence",
+      "url": "https://eservices.nysed.gov/professions/verification-search",
+      "result": "match",
+      "message": null,
+      "searches": [
+        "last=KINKHABWALA; first=MONA PARIKH; profession=Medicine (060)"
+      ],
+      "checked_at": "2026-11-16T20:55:18.464Z"
+    }
+  ],
+  "message": "One matching record found in New York State Education Dept. – Verify a Licence.",
+  "checked_at": "2026-11-16T20:55:18.464Z"
+}
